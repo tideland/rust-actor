@@ -3,13 +3,11 @@
 // Copyright (C) 2024 Frank Mueller / Oldenburg / Europe / World
 // --------------------------------------------------------
 
-use actor::AsyncActor;
+use actor::{ActorState, AsyncActor};
+use std::sync::{Arc, Mutex};
 
 #[tokio::test]
-// Test the async actor with a simple task. Will always return Ok(())
-// as the task is processed asynchonously. So sending an error task
-// first might return Err() as well as Ok() depending on how early
-// it will be processed.
+// Test the async actor with a simple positive task.
 async fn test_actor() {
     let actor = AsyncActor::new();
 
@@ -19,46 +17,59 @@ async fn test_actor() {
     assert_eq!(result, Ok(()));
 }
 
-// Test the async actor with a simple task that fails. It will stop processing
-// further tasks. Initial positiv messages have to be sent before the error
-// due to queueing. Still the error task is the first to be processed and so
-// it's error later.
 #[tokio::test]
-async fn test_actor_error_loop() {
+// Test the async actor with a simple positive task and stopping it.
+async fn test_actor_stop() {
     let actor = AsyncActor::new();
-    let ouch_str = "Ouch!".to_string();
-    let ouch_err = Err(ouch_str.clone());
-    // Send initial error task to the actor.
-    let _ = actor.send(|| ouch_err).await;
 
-    let mut ret_str = "init".to_string();
-    let mut counter = 50;
+    let _ = actor.stop().await;
 
-    println!(
-        "'{}' is expected to be changed in the test to '{}'",
-        ret_str, ouch_str,
+    // Sadly we have to wait a bit to ensure that the actor is stopped
+    // as it works asynchronously.
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        actor.state(),
+        ActorState::Stopped,
+        "Actor should be in stopped state"
     );
 
-    loop {
-        // Should once return the first error as it is the result of the first task.
-        let result = actor.send(|| Ok(())).await;
-        counter -= 1;
+    // Expect sending a task to the actor to fail.
+    let result = actor.send(|| Ok(())).await;
+    assert_eq!(result, Err("Actor is stopped".to_string()));
+}
 
-        if counter == 0 || result.is_err() {
-            match result {
-                Ok(_) => {
-                    ret_str = "ok".to_string();
-                }
-                Err(e) => {
-                    ret_str = e;
-                }
-            }
+#[tokio::test]
+// Test an error task. All tasks after error talk should not be processed.
+async fn test_actor_error() {
+    let actor = AsyncActor::new();
+    // Send initial error task to the actor.
+    let _ = actor.send(|| Err("Ouch!".to_string())).await;
+    let counter = Arc::new(Mutex::new(1));
+
+    loop {
+        let counter_clone = counter.clone();
+        let result = actor
+            .send(move || {
+                let mut counter = counter_clone.lock().unwrap();
+                *counter += 1;
+                Ok(())
+            })
+            .await;
+        // Check the current value of counter outside the closure
+        let current_counter = *counter.lock().unwrap();
+        if result.is_err() || current_counter > 50 {
             break;
         }
     }
+    let test_counter = *counter.lock().unwrap();
 
-    assert!(counter > 0, "Counter should be greater than 0");
-    assert_eq!(ret_str, ouch_str, "Expected error string not found");
+    assert_eq!(test_counter, 1, "Counter should be 0");
+    assert_eq!(
+        actor.state(),
+        ActorState::Error,
+        "Actor should be in error state"
+    )
 }
 
 // --------------------------------------------------------

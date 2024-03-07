@@ -6,37 +6,59 @@
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-// Define the result type for tasks and actor state.
-pub type TaskResult = Result<(), String>;
+/// ActorState represents the current state of the actor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActorState {
+    Running,
+    Stopped,
+    Error,
+}
 
-#[derive(Debug, Clone)]
+/// AsyncActor helps to run tasks asynchronously. Tasks are enqueued and processed
+/// by the actor loop. The actor can be stopped at any time ensuring that all
+/// tasks in the queue are processed before stopping.
+///
+/// Tasks are functions and closures taking no arguments and return a Result<(), String>.
+/// The actor will stop processing tasks if an error is returned. All logical errors
+/// have to be handled by the task itself or in the calling code, e.g. by using the
+/// individual closure's error handling.
 pub struct AsyncActor {
-    sender: mpsc::Sender<Box<dyn FnOnce() -> TaskResult + Send>>,
-    state: Arc<Mutex<TaskResult>>,
+    sender: mpsc::Sender<Box<dyn FnOnce() -> Result<(), String> + Send>>,
+    state: Arc<Mutex<ActorState>>,
+    message: Arc<Mutex<Option<String>>>,
 }
 
 impl AsyncActor {
-    // Creates a new AsyncActor with an initial Running state.
+    /// Creates a new AsyncActor.
     pub fn new() -> Arc<Self> {
-        let (sender, mut receiver) = mpsc::channel::<Box<dyn FnOnce() -> TaskResult + Send>>(32);
-        let state = Arc::new(Mutex::new(Ok(())));
+        let (sender, mut receiver) =
+            mpsc::channel::<Box<dyn FnOnce() -> Result<(), String> + Send>>(32);
+        let state = Arc::new(Mutex::new(ActorState::Running));
+        let message = Arc::new(Mutex::new(None));
 
         let actor = Arc::new(Self {
             sender,
             state: state.clone(),
+            message: message.clone(),
         });
 
         tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
-                let task_result = task();
-                let mut state_guard = state.lock().unwrap();
-
-                // Update the state based on the task result.
-                *state_guard = task_result.clone();
-
-                // If a task results in an error, stop processing further tasks.
-                if task_result.is_err() {
-                    break;
+                match task() {
+                    Ok(()) => {}
+                    Err(err_msg) => {
+                        if err_msg == "ACTOR::STOP" {
+                            *state.lock().unwrap() = ActorState::Stopped;
+                            // Set the message to "Actor stopped" if it is not set yet.
+                            if message.lock().unwrap().is_none() {
+                                *message.lock().unwrap() = Some("Actor stopped".to_string());
+                            }
+                            break;
+                        }
+                        *state.lock().unwrap() = ActorState::Error;
+                        *message.lock().unwrap() = Some(err_msg);
+                        break;
+                    }
                 }
             }
         });
@@ -44,33 +66,58 @@ impl AsyncActor {
         actor
     }
 
-    // Sends a task to the AsyncActor and returns the current state.
-    pub async fn send<F>(&self, task: F) -> TaskResult
+    /// Sends a task to the AsyncActor.
+    pub async fn send<F>(&self, task: F) -> Result<(), String>
     where
-        F: FnOnce() -> TaskResult + Send + 'static,
+        F: FnOnce() -> Result<(), String> + Send + 'static,
     {
         {
             // Check the current state before enqueuing a new task.
             let state_guard = self.state.lock().unwrap();
-            if state_guard.is_err() {
-                // If the actor is in an error state, return the error immediately.
-                return state_guard.clone();
+            match *state_guard {
+                ActorState::Running => {}
+                ActorState::Stopped => return Err("Actor is stopped".to_string()),
+                ActorState::Error => {
+                    if let Some(msg) = &*self.message.lock().unwrap() {
+                        return Err(msg.clone());
+                    }
+                }
             }
         } // Release the lock before proceeding.
 
-        let send_result = self.sender.send(Box::new(task)).await;
-        match send_result {
+        // Send the task to the actor loop.
+        match self.sender.send(Box::new(task)).await {
             Ok(_) => {
-                // Return the current state after enqueuing the task.
-                self.state.lock().unwrap().clone()
+                return Ok(());
             }
-            Err(_) => self.state(),
+            Err(err_msg) => {
+                return Err(format!("Actor send error: {}", err_msg.to_string()).to_string());
+            }
         }
     }
 
-    // Retrieves the current state of the AsyncActor.
-    pub fn state(&self) -> TaskResult {
+    /// Retrieves the current state of the AsyncActor.
+    pub fn state(&self) -> ActorState {
         self.state.lock().unwrap().clone()
+    }
+
+    /// Retrieves the current message of the AsyncActor.
+    pub fn message(&self) -> Option<String> {
+        self.message.lock().unwrap().clone()
+    }
+
+    /// Stops the actor. This method will return immediately while the actor will
+    /// continue processing the remaining tasks in the queue before stopping.
+    pub async fn stop(&self) -> Result<(), String> {
+        let stopper = Box::new(|| Err("ACTOR::STOP".to_string()));
+        match self.sender.send(stopper).await {
+            Ok(_) => {
+                return Ok(());
+            }
+            Err(err_msg) => {
+                return Err(format!("Actor stopped: {}", err_msg.to_string()).to_string());
+            }
+        }
     }
 }
 
