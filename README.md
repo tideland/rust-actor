@@ -15,17 +15,13 @@ I hope you like it. ;)
 use actor::AsyncActor;
 
 fn main() {
-    let actor = actor::AsyncActor::new();
-
-    // The result only contains the success of sending.
-    // In case of an error returned by a clossure the internal
-    // Actor states is broken and the sending will fail.
-    //
-    // External reading, setting, and errors have to be handled
-    // by the closure itself.
-    let result = actor.send(||
-        println!("Hello, World!");
-    ).await;
+    let actor = AsyncActor::new();
+    let _ = actor
+        .send(|| {
+            println!("Hello from actor!");
+            Ok(())
+        })
+        .await;
 }
 ```
 

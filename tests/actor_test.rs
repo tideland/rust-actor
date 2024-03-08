@@ -72,9 +72,73 @@ async fn test_actor_error() {
     )
 }
 
+#[tokio::test]
+// Test an actor as field of a struct.
+async fn test_shared_async_actor() {
+    let test_actor = AsyncCounter::new().await;
+
+    test_actor.incr().await;
+    test_actor.incr().await;
+    test_actor.incr().await;
+    test_actor.decr().await;
+
+    // Wait a bit to ensure that the actor has processed all tasks.
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let value = test_actor.read_value().await;
+
+    assert_eq!(value, 2, "Counter should be 2");
+}
+
 // --------------------------------------------------------
 // TEST HELPER
 // --------------------------------------------------------
+
+// AsyncCounter helps testing using the AsyncActor inside a struct as
+// a field.
+struct AsyncCounter {
+    actor: Arc<AsyncActor>,
+    value: Arc<Mutex<i32>>,
+}
+
+impl AsyncCounter {
+    async fn new() -> Self {
+        let actor = AsyncActor::new();
+        let value = Arc::new(Mutex::new(0));
+        AsyncCounter { actor, value }
+    }
+
+    async fn incr(&self) {
+        let value = self.value.clone();
+        let actor = self.actor.clone();
+
+        let _ = actor
+            .send(move || {
+                let mut value = value.lock().unwrap();
+                *value += 1;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn decr(&self) {
+        let value = self.value.clone();
+        let actor = self.actor.clone();
+
+        let _ = actor
+            .send(move || {
+                let mut value = value.lock().unwrap();
+                *value -= 1;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn read_value(&self) -> i32 {
+        *self.value.lock().unwrap()
+    }
+}
+
 /*
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CounterState {

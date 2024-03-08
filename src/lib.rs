@@ -6,6 +6,9 @@
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+/// Task is a function or closure taking no arguments and returning a Result<(), String>.
+pub type Task = Box<dyn FnOnce() -> Result<(), String> + Send>;
+
 /// ActorState represents the current state of the actor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActorState {
